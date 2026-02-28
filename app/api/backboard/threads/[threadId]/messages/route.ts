@@ -61,8 +61,33 @@ export async function POST(
 
     // Handle streaming response
     if (isStreaming && response.body) {
-      // Pass through the stream from Backboard API
-      return new Response(response.body, {
+      // Create a transform stream that logs SSE events for debugging
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+
+      const stream = new ReadableStream({
+        async start(controller) {
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) {
+                console.log('[SSE Debug] Stream ended (done=true)');
+                controller.close();
+                break;
+              }
+              const text = decoder.decode(value, { stream: true });
+              // Log first few chunks for debugging
+              console.log('[SSE Debug] Raw chunk:', JSON.stringify(text).slice(0, 500));
+              controller.enqueue(value);
+            }
+          } catch (error) {
+            console.error('[SSE Debug] Stream error:', error);
+            controller.error(error);
+          }
+        },
+      });
+
+      return new Response(stream, {
         headers: {
           'Content-Type': 'text/event-stream',
           'Cache-Control': 'no-cache',

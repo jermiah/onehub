@@ -118,7 +118,7 @@ export function ChatView({ threadId }: ChatViewProps) {
         if (content) {
           formData.append('content', content);
         }
-        formData.append('stream', 'false'); // Disable streaming (Backboard API format issue)
+        formData.append('stream', 'true'); // Enable streaming
         formData.append('memory', memoryMode.toLowerCase());
         formData.append('llm_provider', modelConfig.llm_provider);
         formData.append('model_name', modelConfig.model_name);
@@ -192,6 +192,11 @@ export function ChatView({ threadId }: ChatViewProps) {
           };
           setStreamingMessage(streamingMsg);
 
+          // Track currentEvent across chunks (SSE event/data can span chunks)
+          let currentEvent = '';
+          // Track if we've received a complete/done signal to avoid duplication
+          let streamCompleted = false;
+
           try {
             while (true) {
               const { done, value } = await reader.read();
@@ -200,8 +205,6 @@ export function ChatView({ threadId }: ChatViewProps) {
               buffer += decoder.decode(value, { stream: true });
               const lines = buffer.split('\n');
               buffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-              let currentEvent = '';
 
               for (const line of lines) {
                 const parsed = parseSSEEvent(line);
@@ -213,70 +216,90 @@ export function ChatView({ threadId }: ChatViewProps) {
                 }
 
                 if (parsed.data) {
-                  // Handle different event types
-                  if (currentEvent === 'content' || currentEvent === 'delta' || !currentEvent) {
-                    // Content chunk - append to message
-                    try {
-                      const data = JSON.parse(parsed.data);
-                      if (data.content || data.delta || data.text) {
-                        assistantContent += data.content || data.delta || data.text || '';
+                  // Skip [DONE] signal
+                  if (parsed.data === '[DONE]') {
+                    streamCompleted = true;
+                    console.log('[Stream] Received [DONE] signal');
+                    continue;
+                  }
+
+                  // If stream already completed, skip further content to avoid duplication
+                  if (streamCompleted) continue;
+
+                  // Try to parse as JSON
+                  let jsonData: Record<string, unknown> | null = null;
+                  try {
+                    jsonData = JSON.parse(parsed.data);
+                  } catch {
+                    // Not JSON - treat as plain text content delta
+                    assistantContent += parsed.data;
+                    setStreamingMessage(prev => prev ? {
+                      ...prev,
+                      content: assistantContent,
+                    } : null);
+                    continue;
+                  }
+
+                  if (jsonData) {
+                    // Skip user message echoes
+                    if (jsonData.role === 'user') {
+                      console.log('[Stream] Skipping user message echo');
+                      continue;
+                    }
+
+                    // Extract message_id from any event
+                    if (jsonData.message_id) {
+                      messageId = jsonData.message_id as string;
+                    }
+
+                    // Extract metadata (memories, files, attachments) from any event
+                    if (jsonData.retrieved_memories) {
+                      retrievedMemories = jsonData.retrieved_memories as Message['retrieved_memories'];
+                    }
+                    if (jsonData.retrieved_files) {
+                      retrievedFiles = jsonData.retrieved_files as Message['retrieved_files'];
+                    }
+                    if (jsonData.attachments) {
+                      const pendingDocs = (jsonData.attachments as Document[]).filter(
+                        (a: Document) => a.status !== 'indexed'
+                      );
+                      pendingDocs.forEach((doc: Document) => {
+                        addIndexingDocument(doc);
+                      });
+                      if (pendingDocs.length > 0) {
+                        pollingRef.current = setInterval(() => {
+                          pollDocumentStatus(pendingDocs);
+                        }, 2000);
+                      }
+                    }
+
+                    // Handle done/end/complete events - extract metadata but DON'T append content
+                    if (currentEvent === 'done' || currentEvent === 'end' || currentEvent === 'complete' ||
+                        currentEvent === 'message_stop' || currentEvent === 'message_complete') {
+                      console.log('[Stream] Received end event:', currentEvent);
+                      streamCompleted = true;
+                      // If the done event has full content and we haven't streamed any yet, use it
+                      if (!assistantContent && jsonData.content && typeof jsonData.content === 'string') {
+                        assistantContent = jsonData.content;
                         setStreamingMessage(prev => prev ? {
                           ...prev,
                           content: assistantContent,
                         } : null);
                       }
-                      if (data.message_id) {
-                        messageId = data.message_id;
-                      }
-                    } catch {
-                      // Plain text content
-                      if (parsed.data !== '[DONE]') {
-                        assistantContent += parsed.data;
+                      continue;
+                    }
+
+                    // Handle content deltas - append to streaming content
+                    const delta = (jsonData.content || jsonData.delta || jsonData.text || jsonData.chunk) as string | undefined;
+                    if (delta && typeof delta === 'string') {
+                      // Only append if this is the assistant role or no role specified
+                      if (!jsonData.role || jsonData.role === 'assistant') {
+                        assistantContent += delta;
                         setStreamingMessage(prev => prev ? {
                           ...prev,
                           content: assistantContent,
                         } : null);
                       }
-                    }
-                  } else if (currentEvent === 'metadata' || currentEvent === 'context') {
-                    // Metadata with memories/files
-                    try {
-                      const data = JSON.parse(parsed.data);
-                      if (data.retrieved_memories) {
-                        retrievedMemories = data.retrieved_memories;
-                      }
-                      if (data.retrieved_files) {
-                        retrievedFiles = data.retrieved_files;
-                      }
-                    } catch {
-                      // Ignore parsing errors for metadata
-                    }
-                  } else if (currentEvent === 'done' || currentEvent === 'end') {
-                    // Stream complete
-                    try {
-                      const data = JSON.parse(parsed.data);
-                      if (data.retrieved_memories) {
-                        retrievedMemories = data.retrieved_memories;
-                      }
-                      if (data.retrieved_files) {
-                        retrievedFiles = data.retrieved_files;
-                      }
-                      if (data.attachments) {
-                        // Handle document indexing
-                        const pendingDocs = data.attachments.filter(
-                          (a: Document) => a.status !== 'indexed'
-                        );
-                        pendingDocs.forEach((doc: Document) => {
-                          addIndexingDocument(doc);
-                        });
-                        if (pendingDocs.length > 0) {
-                          pollingRef.current = setInterval(() => {
-                            pollDocumentStatus(pendingDocs);
-                          }, 2000);
-                        }
-                      }
-                    } catch {
-                      // Ignore parsing errors
                     }
                   }
                 }

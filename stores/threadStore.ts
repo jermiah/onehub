@@ -138,11 +138,16 @@ export const useThreadStore = create<ThreadStore>()((set, get) => ({
           new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
       );
 
-      // Fetch saved titles from Supabase (or localStorage fallback)
+      // Merge titles: prefer Backboard title, fall back to Supabase
       const savedTitles = await fetchAllTitles();
       const threadsWithTitles = sortedThreads.map((thread: Thread) => {
+        // If Backboard already has a title, use it
+        if (thread.title) {
+          return { ...thread, localTitle: thread.title };
+        }
+        // Fall back to Supabase-saved title
         const savedTitle = savedTitles[thread.thread_id];
-        if (savedTitle && !thread.title) {
+        if (savedTitle) {
           return { ...thread, localTitle: savedTitle, title: savedTitle };
         }
         return thread;
@@ -177,13 +182,16 @@ export const useThreadStore = create<ThreadStore>()((set, get) => ({
       const assistantId = thread.assistant_id || assistantStore.selectedAssistantId;
       const assistant = assistantStore.assistants.find(a => a.assistant_id === assistantId);
 
-      // Apply saved title from localStorage if thread doesn't have one
+      // Apply title: prefer Backboard title, fall back to Supabase
       const savedTitle = getSavedTitle(thread.thread_id);
-      if (savedTitle && !thread.title) {
+      if (thread.title) {
+        thread.localTitle = thread.title;
+      } else if (savedTitle) {
         thread.title = savedTitle;
         thread.localTitle = savedTitle;
       }
 
+      const titleSource = thread.title ? (savedTitle && !thread.title ? 'supabase' : 'backboard') : 'none';
       console.log('[ThreadStore] 📋 Chat loaded:', {
         threadId: thread.thread_id,
         threadTitle: thread.title || thread.localTitle || 'New chat',
@@ -192,7 +200,7 @@ export const useThreadStore = create<ThreadStore>()((set, get) => ({
         model: `${chatStore.modelConfig.llm_provider}/${chatStore.modelConfig.model_name}`,
         memoryMode: chatStore.memoryMode,
         messageCount: thread.messages?.length || 0,
-        titleSource: savedTitle ? 'localStorage' : 'api',
+        titleSource,
       });
 
       // If thread has assistant_id and it's different from currently selected, switch to it
@@ -416,9 +424,25 @@ export const useThreadStore = create<ThreadStore>()((set, get) => ({
             : state.currentThread,
       }));
 
-      // Save to Supabase (with localStorage fallback)
+      // Save to Backboard via PATCH (so title persists on refresh)
+      try {
+        const patchResponse = await fetchWithAuth(`/api/backboard/threads/${threadId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title }),
+        });
+        if (patchResponse.ok) {
+          console.log('[ThreadStore] Title saved to Backboard API');
+        } else {
+          console.warn('[ThreadStore] Backboard PATCH failed, falling back to Supabase');
+        }
+      } catch (patchError) {
+        console.warn('[ThreadStore] Backboard PATCH error:', patchError);
+      }
+
+      // Also save to Supabase as backup
       await saveTitleToStorage(threadId, title);
-      console.log('[ThreadStore] Title saved to storage')
+      console.log('[ThreadStore] Title saved to storage');
     } catch (error) {
       console.error('[ThreadStore] Error generating title:', error);
       // Fallback to simple title
@@ -432,7 +456,16 @@ export const useThreadStore = create<ThreadStore>()((set, get) => ({
             ? { ...state.currentThread, localTitle: fallbackTitle, title: fallbackTitle }
             : state.currentThread,
       }));
-      // Save fallback title to storage
+      // Save fallback title to both Backboard and storage
+      try {
+        await fetchWithAuth(`/api/backboard/threads/${threadId}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ title: fallbackTitle }),
+        });
+      } catch {
+        // Best effort
+      }
       saveTitleToStorage(threadId, fallbackTitle);
     }
   },

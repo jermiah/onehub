@@ -14,7 +14,9 @@
       "Bash(npx next lint)",
       "Bash(npx tsc:*)",
       "WebFetch(domain:github.com)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nInitial commit: OneHub - AI chat with persistent memory and RAG\n\n- Next.js 14 app with TypeScript and TailwindCSS\n- Backboard API integration for chat and memory\n- User-configurable API keys via localStorage\n- Supabase for persistent thread titles\n- Dark theme UI with shadcn/ui components\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(gh repo create:*)"
     ]
   }
 }
